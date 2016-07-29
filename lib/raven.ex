@@ -89,7 +89,7 @@ defmodule Raven do
   def capture_exception(exception) do
     case Application.get_env(:raven, :dsn) do
       dsn when is_bitstring(dsn) ->
-        capture_exception(exception |> transform, dsn |> parse_dsn!)
+        capture_exception(exception |> transform |> clean_event, dsn |> parse_dsn!)
       _ ->
         :error
     end
@@ -114,6 +114,21 @@ defmodule Raven do
         end
       _ -> :error
     end
+  end
+
+  ## Cleans event payload
+
+  @doc """
+  Cleans event payload
+  """
+  @spec clean_event(%Event{}) :: %Event{}
+
+  # skip empty frames
+  def clean_event(%Event{stacktrace: %{frames: []}} = event) do
+    Map.delete(event, :stacktrace)
+  end
+  def clean_event(event) do
+    event
   end
 
   ## Transformers
@@ -199,27 +214,32 @@ defmodule Raven do
   end
 
   defp transform_stacktrace_line([frame|t], state) do
-    [app, filename, lineno, function] =
-      case Regex.run(~r/^(\((.+?)\) )?(.+?):(\d+): (.+)$/, frame) do
-        [_, _, filename, lineno, function] -> [:unknown, filename, lineno, function]
-        [_, _, app, filename, lineno, function] -> [app, filename, lineno, function]
-      end
+    match = case Regex.run(~r/^(\((.+?)\) )?(.+?):(\d+): (.+)$/, frame) do
+      [_, _, filename, lineno, function] -> [:unknown, filename, lineno, function]
+      [_, _, app, filename, lineno, function] -> [app, filename, lineno, function]
+      _ -> :no_match
+    end
 
-    state = if state.culprit, do: state, else: %{state | culprit: function}
+    state = case match do
+      [app, filename, lineno, function] ->
+        state = if state.culprit, do: state, else: %{state | culprit: function}
 
-    state = put_in(state.stacktrace.frames, state.stacktrace.frames ++ [%{
-      filename: filename,
-      function: function,
-      module: nil,
-      lineno: String.to_integer(lineno),
-      colno: nil,
-      abs_path: nil,
-      context_line: nil,
-      pre_context: nil,
-      post_context: nil,
-      in_app: not app in ["stdlib", "elixir"],
-      vars: %{},
-    }])
+        state = put_in(state.stacktrace.frames, [%{
+          filename: filename,
+          function: function,
+          module: nil,
+          lineno: String.to_integer(lineno),
+          colno: nil,
+          abs_path: nil,
+          context_line: nil,
+          pre_context: nil,
+          post_context: nil,
+          in_app: not app in ["stdlib", "elixir"],
+          vars: %{},
+        } | state.stacktrace.frames])
+      :no_match ->
+        state
+    end
 
     transform(t, state)
   end
